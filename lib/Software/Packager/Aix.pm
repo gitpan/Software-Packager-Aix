@@ -33,7 +33,7 @@ use Software::Packager::Object::Aix;
 our @ISA = qw( Software::Packager );
 our @EXPORT = qw();
 our @EXPORT_OK = qw();
-our $VERSION = 0.06;
+our $VERSION = 0.05;
 
 ####################
 # Functions
