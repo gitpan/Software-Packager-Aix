@@ -1,6 +1,6 @@
 =head1 NAME
 
-Software::Packager::Aix - The Software::Packager extension for AIX 3.2 and above
+Software::Packager::Aix - The Software::Packager extension for AIX 4.1 and above
 
 =head1 SYNOPSIS
 
@@ -9,13 +9,26 @@ Software::Packager::Aix - The Software::Packager extension for AIX 3.2 and above
 
 =head1 DESCRIPTION
 
-This module is used to create software packages in a format suitable for
-installation with installp.
-The procedure is baised heaverly on the lppbuild version 2.1 scripts.
+This module is used to create software packages in a Backup-format file (bff)
+suitable for installation with installp.
+
+This module creates packages for AIX 4.1 and higher only.
+Due to the compatability requirements of Software::Packager multiple
+components in the same package are not supported. This may be changed at some
+point in the future.
+
+This module is in part a baised on the workings of the lppbuild scripts. Where
+possible I've worked from the standards, where I had no idea what they were
+talking about I refered to the lppbuild scripts for an understanding. As such
+I'd like to thank the writers of lppbuild version 2.1.
 I believe these scripts to be written by Jim Abbey. Who ever it was thanks 
 for your work. It has proven envaluable.
 lppbuild is available from http://aixpdslib.seas.ucla.edu/
-It creates AIX 4.1 and higher packages only.
+
+Please note that this module will eventually comply with the IBM documented
+standard which can be found at
+
+http://publibn.boulder.ibm.com/doc_link/en_US/a_doc_lib/aixprggd/genprogc/pkging_sw4_install.htm
 
 =head1 FUNCTIONS
 
@@ -29,9 +42,7 @@ use strict;
 use File::Path;
 use File::Copy;
 use File::Basename;
-use FileHandle 2.0;
 use Cwd;
-use Data::Dumper;
 # Custom modules
 use Software::Packager;
 use Software::Packager::Object::Aix;
@@ -42,7 +53,7 @@ use vars qw(@ISA @EXPORT @EXPORT_OK $VERSION);
 @ISA = qw( Software::Packager );
 @EXPORT = qw();
 @EXPORT_OK = qw();
-$VERSION = 0.09;
+$VERSION = 0.10;
 
 ####################
 # Functions
@@ -66,15 +77,33 @@ sub new
 
 =head2 B<add_item()>
 
- The method overrides the add_item method of Software::Packager to use
- Software::Packager::Object::Aix.
- See Software::Packager for more details on this method.
+The method overrides the add_item method of Software::Packager to use
+Software::Packager::Object::Aix.
+For more details see the documentation in:
+
+ Software::Packager
+ Software::Packager::Object
+ Software::Packager::Object::Aix
 
 =cut
 sub add_item
 {
 	my $self = shift;
 	my %data = @_;
+	
+	# Hardlinks are associated with the file they refernce on AIX
+	if ($data{'TYPE'} =~ /hardlink/i)
+	{
+		unless (exists $self->{'OBJECTS'}->{$data{'SOURCE'}})
+		{
+			warn "Error: Cannot add a hard link for $data{'DESTINATION'}\n";
+			warn "       until the source object has been added to the package.\n";
+			return undef;
+		}
+		$self->{'OBJECTS'}->{$data{'SOURCE'}}->links($data{'DESTINATION'});
+		return 1;
+	}
+
 	my $object = new Software::Packager::Object::Aix(%data);
 
 	return undef unless $object;
@@ -98,7 +127,7 @@ The lpp package types are
 
 If the lpp package type is not set, the default of "I" for an install package is 
 set (version minor and fix numbers are 0) and "S" for an update package 
-(version minor and fix numbers are non 0)
+(version minor and/or fix numbers are non 0)
 
 =cut
 sub lpp_package_type
@@ -134,7 +163,11 @@ sub lpp_package_type
 
 =head2 B<component_name()>
 
+ $packager->component_name($value);
+ $component_name = $packager->component_name();
+
 This method sets or returns the component name for this package.
+The compoment name is a required value for AIX packages.
 
 =cut
 sub component_name
@@ -156,9 +189,10 @@ sub component_name
 
 =head2 B<package()>
 
-$packager->package();
-This function overrides the base API in Software::Packager. I controls the
-process of package creation.
+ $packager->package();
+
+This method overrides the base API in Software::Packager.
+it does all the nasty work of creating the package.
 
 =cut
 sub package
@@ -182,6 +216,14 @@ sub package
 		warn "Error: Problems were encountered in the setup phase\n";
 		return undef;
 	}
+
+	# Now create the final backup file format package.
+	unless ($self->_create_bff())
+	{
+		warn "Error: Problems were encountered creating the backup format file: $!\n";
+                return undef;
+	}
+        
 	unless ($self->_cleanup())
 	{
 		warn "Error: Problems were encountered in the cleanup phase\n";
@@ -192,12 +234,10 @@ sub package
 
 ################################################################################
 # Function:	_setup()
-
-=head2 B<_setup()>
-
- This method sets up the temporary build structure.
-
-=cut
+# Description:	This method sets up the temporary build structure.
+# Arguments:	None
+# Returns:	True is all goes okay else undef
+#
 sub _setup
 {
 	my $self = shift;
@@ -205,8 +245,49 @@ sub _setup
 
 	unless (-d $tmp_dir)
         {
-            mkpath($tmp_dir, 0, 0750) or
-		warn "Error: Problems were encountered creating directory \"$tmp_dir\": $!\n";
+		unless (mkpath($tmp_dir, 0, 0750))
+		{
+			warn "Error: Problems were encountered creating directory \"$tmp_dir\": $!\n";
+			return undef;
+		}
+        }
+
+	# determine if we have a root part. If so set up some new objects and
+	# modify the objects that are not installed in /usr
+	if ($self->_find_lpp_type() eq "B")
+	{
+		$self->_setup_for_root();
+	}
+	elsif ($self->_find_lpp_type() eq "U")
+	{
+		# This object is required for user parts
+		my %data;
+		$data{'TYPE'} = 'directory';
+		$data{'MODE'} = '0755';
+		$data{'DESTINATION'} = "/usr/lpp/" . $self->program_name();
+		unless ($self->add_item(%data))
+		{
+			warn "Error: Couldn't add $data{'DESTINATION'} to the package.\n";
+		}
+	}
+	elsif ($self->_find_lpp_type() eq "H")
+	{
+		# This object is required for share parts
+		my %data;
+		$data{'TYPE'} = 'directory';
+		$data{'MODE'} = '0755';
+		$data{'DESTINATION'} = "/usr/share/lpp/" . $self->program_name();
+		unless ($self->add_item(%data))
+		{
+			warn "Error: Couldn't add $data{'DESTINATION'} to the package.\n";
+		}
+	}
+
+	# Create the controls files and add them to the package.
+	unless ($self->_create_control_files())
+        {
+		warn "Error: Problems were encountered creating the control files for the package: $!\n";
+                return undef;
         }
 
         # create the package structure under the tmp_dir
@@ -223,147 +304,195 @@ sub _setup
                 return undef;
         }
 
-        # create the control files for hte package
-	unless ($self->_create_control_files())
-        {
-		warn "Error: Problems were encountered creating the control files: $!\n";
-                return undef;
-        }
-        
 	return 1;
 }
 
 ################################################################################
 # Function:	_cleanup()
-
-=head2 B<_cleanup()>
-
- This method cleans up after us.
-
-=cut
+# Description:	This method cleans up after us.
+# Arguments:	None
+# Returns:	True is all goes okay else undef
+#
 sub _cleanup
 {
 	my $self = shift;
 	my $tmp_dir = $self->tmp_dir();
 
 	# there has to be a better way to to this!
-#	return undef unless system("chmod -R 0777 $tmp_dir") eq 0;
-#	rmtree($tmp_dir, 1, 1);
+	system("chmod -R 0777 $tmp_dir 2>/dev/null");
+	#rmtree($tmp_dir, 0, 1);
 
 	return 1;
 }
 
 ################################################################################
-# Function:	_version()
+# Function:	version()
 
-=head2 B<_version()>
+=head2 B<version()>
 
- This method overrides Software::Packager::_version
- This method is used to format the version and return it in the desired format 
- for the current packaging system.
+This method is used to set the version and return it in the correct format
+required for AIX. 
+
+Any invalid entries in the version will be automatically corrected and a
+warning printed.
+
+This is a excerpt from the standard.
+
+The fileset level is referred to as the level or alternatively as the v.r.m.f or VRMF and has the form: 
+
+Version.Release.ModificationLevel.FixLevel[.FixID] 
+
+ Version		A numeric field of 1 to 2 digits that identifies the version number.  
+ Release		A numeric field of 1 to 2 digits that identifies the release number.  
+ ModificationLevel	A numeric field of 1 to 4 digits that identifies the modification level.  
+ FixLevel		A numeric field of 1 to 4 digits that identifies the fix level.  
+ FixID			A character field of 1 to 9 characters identifying the fix identifier.
+ 			The FixID is used by Version 3.2-formatted fileset updates only.  
+
+A base fileset installation level is the full initial installation level of a fileset.
+This level contains all files in the fileset, as opposed to a fileset update,
+which may contain a subset of files from the full fileset. 
+
+All filesets in a software package should have the same fileset level,
+though it is not required for AIX Version 4.1-formatted packages. 
+
+For all new levels of a fileset, the fileset level must increase.
+The installp command uses the fileset level to check for a later level of the
+product on subsequent installations. 
+
+Fileset level precedence reads from left to right (for example, 3.2.0.0 is a
+newer level than 2.3.0.0). 
+
+
+Fileset Level Rules and Conventions for AIX Version 4.1-Formatted Filesets
+The following conventions and rules have been put in place in order to simplify
+the software maintenance for product developers and customers: 
+
+A base fileset installation level should have a fix level of 0 (zero). 
+
+A base fileset installation level package must contain the functionality
+provided in other installation packages for that fileset with lower fileset
+levels. For example, the Plan.Day level 2.1 fileset must contain the
+functionality provided in the Plan.Day level 1.1 fileset. 
+
+A fileset update must have either a non-zero modification level or a non-zero
+fix level. 
+
+A fileset update must have the same version and release numbers as the base
+fileset installation level to which it is to be applied. 
+
+Unless otherwise specified in the software package, a fileset update with a
+non-zero fix level must be an update to the fileset with the same version
+number, release number, and modification level and a zero fix level. Providing
+information in the requisite section of the lpp_name file causes an exception to
+this rule. 
+
+Unless otherwise specified in the software package, a fileset update with a
+non-zero modification level and a zero fix level must be an update to the
+fileset with the same version number and release number and a zero modification
+level. Providing information in the requisite section of the lpp_name file
+causes an exception to this rule. 
+
+A fileset update must contain the functionality of the fileset's previous
+updates that apply to the same fileset level. 
 
 =cut
-sub _version
+sub version
 {
 	my $self = shift;
-
-        my ($major, $release, $minor, $fix) = split /\./, $self->{'PACKAGE_VERSION'};
-        # check that we have 4 parts if not then create them
-        $major = 0 unless $major;
-        $release = 0 unless $release;
-        $minor = 0 unless $minor;
-        $fix = 0 unless $fix;
-
-        # check that the major and release values are non zero.
-        $major = 1 if $major <= 0;
-        $release = 1 if $release <= 0;
-
-        # set the lppmode
-        if (($minor eq 0) and ($fix eq 0))
+	my $version = shift;
+        if (scalar $version)
         {
-            $self->_lppmode('I');
-        }
-        else
-        {
-            $self->_lppmode('U');
+                if ($version !~ /^\d+(\.\d+){3,4}$/)
+                {
+                        warn "Warning: The version \"$version\" is not a 4 or 5 field Dewey-Decimal number. It will be modified.\n";
+			$version =~ tr/0-9\.//cd;
+                }
+        	my ($major, $release, $mod, $fix, $fixid) = split /\./, $version;
+        	# check that we have 4 parts if not then create them
+        	$major = 0 unless $major;
+        	$release = 0 unless $release;
+        	$mod = 0 unless $mod;
+        	$fix = 0 unless $fix;
+
+        	# check that the major and release values are non zero.
+        	$major = 1 if $major <= 0;
+        	$release = 1 if $release <= 0;
+
+		# Check that the version fields are the correct length.
+		if (length $major > 2)
+		{
+			warn "Warning: The \"Version\" field of the version contains more than two charaters.\n";
+			warn "         It will be truncated.\n";
+			$major = sprintf("%.2s", $major);
+		}
+		if (length $release > 2)
+		{
+			warn "Warning: The \"Release\" field of the version contains more than two charaters.\n";
+			warn "         It will be truncated.\n";
+			$release = sprintf("%.2s", $release);
+		}
+		if (length $mod > 4)
+		{
+			warn "Warning: The \"ModificationLevel\" field of the version contains more than four charaters.\n";
+			warn "         It will be truncated.\n";
+			$mod = sprintf("%.4s", $mod);
+		}
+		if (length $fix > 4)
+		{
+			warn "Warning: The \"FixLevel\" field of the version contains more than four charaters.\n";
+			warn "         It will be truncated.\n";
+			$fix = sprintf("%.4s", $fix);
+		}
+		if ((defined $fixid) and (length $fixid > 9))
+		{
+			warn "Warning: The \"FixID\" field of the version contains more than nine charaters.\n";
+			warn "         It will be truncated.\n";
+			$fixid = sprintf("%.9s", $fixid);
+		}
+
+        	# set the lppmode
+        	if (($mod eq 0) and ($fix eq 0))
+        	{
+			$self->_lppmode('I');
+        	}
+        	else
+        	{
+			$self->_lppmode('U');
+        	}
+
+        	$self->{'PACKAGE_VERSION'} = "$major.$release.$mod.$fix";
+        	$self->{'PACKAGE_VERSION'} .= ".$fixid" if defined $fixid;
         }
 
-        $self->{'PACKAGE_VERSION'} = $major .".". $release .".". $minor .".". $fix;
 	return $self->{'PACKAGE_VERSION'};
 }
 
 ################################################################################
-# Function:	_check_version()
-
-=head2 B<_check_version()>
-
- This method is used to check the format of the version and returns true, if
- there are any problems then it returns undef;
- This method overrides Software::Packager::_check_version
- Test that the format is digits and periods anything else is a no good.
- The first and second numbers must have 1 or 2 digits
- The rest can have 1 to 4 digits.
-
-=cut
-sub _check_version
-{
-	my $self = shift;
-	my $value = shift;
-	return undef if $value =~ /\D!\./;
-
-        # check if we have 4 parts
-        my @number = split /\./, $value;
-        if (scalar @number < 4)
-        {
-                warn "Warning: Version does not meet the specified format vv.rr.mm.ff it will be modified.\n";
-        }
-
-        my ($major, $release, @rest) = split /\./, $value;
-        # check that we have 4 parts if not then create them
-        $major = 0 unless $major;
-        $release = 0 unless $release;
-
-        # check that each part is valid
-        if ($major <= 0)
-        {
-                warn "Warning: Major version is zero or less. This does not meet the specifications.\n";
-                warn "         The major version will be modified to meet the standard.\n";
-        }
-	if ($release <= 0)
-        {
-                warn "Warning: Release version is zero or less. This does not meet the specifications.\n";
-                warn "         The release version will be modified to meet the standard.\n";
-        }
-
-	return 1;
-}
-
-################################################################################
 # Function:	_find_lpp_type()
-
-=head2 B<_find_lpp_type()>
-
- This method finds the type of LPP we are building.
- If all components are under /usr/share then the part is a SHARE package.
- If all components are under /usr then the part is a USER package.
- If components are under any other directory then the part is a ROOT+USER package.
-
- ROOT only parts are not permitted.
- SHARE + ROOT and or USER parts are not permitted.
-
- Returns the LPP code for the part type on success and undef if there are
- errors.
- a USER part will return U
- a ROOT+USER part will return B
- a SHARE part will return H
-
-=cut
+# Description:	This method finds the type of LPP we are building.
+#	If all components are under /usr/share then the part is a SHARE package.
+#	If all components are under /usr then the part is a USER package.
+#	If components are under any other directory then the part is a ROOT+USER
+#	package.  
+#	ROOT only parts are not permitted.
+#	SHARE + ROOT and or USER parts are not permitted.
+# Returns:	The LPP code for the part type on success and undef if there are
+#		errors.
+#		A USER part will return U.
+#		A ROOT+USER part will return B
+#		A SHARE part will return H
+# Arguments:	None
+#
 sub _find_lpp_type
 {
 	my $self = shift;
 	my $share = 0;
 	my $user = 0;
 	my $root = 0;
+
+	# As this function may be slow to run only run it once.
+	return $self->{'LPP_TYPE'} if scalar $self->{'LPP_TYPE'};
 
 	foreach my $object ($self->get_object_list())
 	{
@@ -382,9 +511,18 @@ sub _find_lpp_type
 		warn "Error: Packages with SHARE and ROOT parts are not permitted.\n";
 		return undef;
 	}
-	elsif ($root) { return 'B'; }
-	elsif ($user) { return 'U'; }
-	elsif ($share) { return 'H'; }
+	elsif ($root)
+	{
+		$self->{'LPP_TYPE'} = 'B';
+	}
+	elsif ($user)
+	{
+		$self->{'LPP_TYPE'} = 'U';
+	}
+	elsif ($share)
+	{
+		$self->{'LPP_TYPE'} = 'H';
+	}
 	else
 	{
 		warn "Error: Package type could not be determined.\n";
@@ -394,14 +532,12 @@ sub _find_lpp_type
 
 ################################################################################
 # Function:	_lppmode()
-
-=head2 B<_lppmode()>
-
-This method sets or returns the lppmode.
-The lppmode can be either install (I) or update (U). This is set when the 
-version is set.
-
-=cut
+# Description:	This method sets or returns the lppmode.
+#		The lppmode can be either install (I) or update (U).
+#		This is set when the version is set.
+# Argument:	The mode of the package.
+# Returns:	The mode of the package if nothing is passed.
+#
 sub _lppmode
 {
 	my $self = shift;
@@ -418,76 +554,71 @@ sub _lppmode
 
 ################################################################################
 # Function:	_create_lpp_name()
-
-=head2 B<_create_lpp_name()>
-
-This method creates the file lpp_name for the package.
-
-=cut
+# Description:	This method creates the file lpp_name for the package.
+# Argument:	None.
+# Returns:	None.
+#
 sub _create_lpp_name
 {
         my $self = shift;
         my $lpp_name_file = $self->tmp_dir() . "/lpp_name";
-        my $lpp_name = new FileHandle();
-        $lpp_name->open(">$lpp_name_file");
+        open (LPPNAME, ">$lpp_name_file");
 
-        $lpp_name->print("4 R");
-        $lpp_name->print(" " . $self->lpp_package_type());
-        $lpp_name->print(" " . $self->program_name());
-        $lpp_name->print(" {\n");
+        print LPPNAME "4 R";
+        print LPPNAME " " . $self->lpp_package_type();
+        print LPPNAME " " . $self->program_name();
+        print LPPNAME " {\n";
 
-        $lpp_name->print(" " . $self->program_name() .".". $self->component_name());
-        $lpp_name->print(" " . $self->version());
+        print LPPNAME " " . $self->program_name() .".". $self->component_name();
+        print LPPNAME " " . $self->version();
 
         # not sure what this is for. I'll have to check the specs.
-        $lpp_name->print(" 1");
+        print LPPNAME " 1";
 
         if ($self->reboot_required())
         {
-            $lpp_name->print(" b");
+            print LPPNAME " b";
         }
         else
         {
-            $lpp_name->print(" N");
+            print LPPNAME " N";
         }
-        $lpp_name->print(" " . $self->lpp_package_type());
+        print LPPNAME " " . $self->_find_lpp_type();
 
-        $lpp_name->print(" en_US");
-        $lpp_name->print(" ". $self->description() . "\n");
-        $lpp_name->print("[\n");
+        print LPPNAME " en_US";
+        print LPPNAME " ". $self->description() . "\n";
+        print LPPNAME "[\n";
 
         if ($self->prerequisites())
         {
-            # This needs to be implemented.
+            # TODO:  This needs to be implemented.
         }
-        $lpp_name->print("\%\n");
-        $lpp_name->print($self->_find_disk_usage());
+        print LPPNAME "\%\n";
+        print LPPNAME $self->_find_disk_usage();
 
-        # need to implement page space.
-        # need to implement install space. (space required to extract crontrol files from liblpp.a
-        # need to implement save space.
+        # TODO:  need to implement page space.
+        # TODO:  need to implement install space. (space required to extract crontrol files from liblpp.a
+        # TODO:  need to implement save space.
 
-        $lpp_name->print("\%\n");
+        print LPPNAME "\%\n";
         
-        # need to implement supersede ability
+        # TODO:  need to implement supersede ability
 
-        $lpp_name->print("\%\n");
+        print LPPNAME "\%\n";
 
-        # need to implement fix information
+        # TODO:  need to implement fix information
 
-        $lpp_name->print("]\n");
-        $lpp_name->print("}\n");
-        $lpp_name->close();
+        print LPPNAME "]\n";
+        print LPPNAME "}\n";
+        close LPPNAME;
 }
 
 ################################################################################
 # Function:	_find_disk_usage()
-
-=head2 B<_find_disk_usage()>
-
-This method finds the disk usage for the package directories
-
-=cut
+# Description:	This method finds the disk usage for the package directories.
+# Arguments:	None.
+# Returns:	The disk usage.
+#
 sub _find_disk_usage
 {
     my $self = shift;
@@ -496,7 +627,7 @@ sub _find_disk_usage
     chdir $dir;
     
     # find the directories
-    my @directories = `find . ! -type d -exec dirname {} \\; | sort -u`;
+   my @directories = `find . ! -type d -exec dirname {} \\; | sort -u`;
 
     # find the disk usage
     my $usage;
@@ -513,21 +644,20 @@ sub _find_disk_usage
 
 ################################################################################
 # Function:	_create_package_structure()
-
-=head2 B<_create_package_structure()>
-
-This method creates the package structure for the package under the tmp 
-directory.
-
-=cut
+# Description:	This method creates the package structure for the package under
+#		the tmp directory.
+# Arguments:	None.
+# Returns:	None.
+#
 sub _create_package_structure
 {
         my $self = shift;
         my $tmp_dir = $self->tmp_dir();
 
-        foreach my $object ($self->get_directory_objects(), $self->get_file_objects(), $self->get_link_objects())
+	my $lpp_type = $self->_find_lpp_type();
+        foreach my $object ($self->get_object_list())
         {
-                my $destination = "$tmp_dir/". $object->destination();
+		my $destination = "$tmp_dir". $object->destination();
                 my $source = $object->source();
                 my $type = $object->type();
                 my $mode = $object->mode();
@@ -556,10 +686,12 @@ sub _create_package_structure
                         my $directory = dirname($destination);
                         unless (-d $directory)
                         {
-                                warn "Error: Directory \"$directory\" is not in the package. This is not permitted. Please add an entry for this directory and try again.\n";
-                                return undef;
+				mkpath($directory, 0, 0755);
                         }
-                        copy($source, $destination);
+                        unless (copy($source, $destination))
+			{
+				warn "Error: Couldn't copy $source to $destination: $!\n";
+			}
                         unless (system("chown $user $destination") eq 0)
                         {
                             warn "Error: Couldn't set the user to \"$user\" for \"$destination\": $!\n";
@@ -597,133 +729,459 @@ sub _create_package_structure
                         warn "Warning: Don't know what type of object \"$destination\" is.\n";
                 }
         }
+
+	# Now we need to remove the user_liblpp.a and root_liblpp.a so that they
+	# are not added to the space requirements in the file lpp_name
+	unlink "$tmp_dir/user_liblpp.a";
+	unlink "$tmp_dir/root_liblpp.a" if -f "$tmp_dir/root_liblpp.a";
+
         return 1;
 }
 
 ################################################################################
 # Function:	_create_control_files()
-
-=head2 B<_create_control_files()>
-
-This method creates the lpp control files (liblpp.a).
-
-=cut
+# Description:	This method creates the lpp control files (liblpp.a). as well as
+#		creating the apply list and inventory which are essentially
+#		required files.
+#		check what sort of install we have.
+#		A share install will only have one liblpp.a in
+#		/usr/share/lpp/PROGRAM/liblpp.a
+#		A user install will only have one liblpp.a in 
+#		/usr/lpp/PROGRAM/liblpp.a
+#		A root install will have two liblpp.a files in 
+#		/usr/lpp/PROGRAM/liblpp.a and
+#		/usr/lpp/PROGRAM../inst_root/liblpp.a
+# Arguments:	None.
+# Returns:	true on success else undef.
+#
 sub _create_control_files
 {
 	my $self = shift;
         my $tmp_dir = $self->tmp_dir();
 
-        my ($user, $root) = $self->_control_file_names();
-        # if we couldn't find the control file names then undef would heve been
-        # returned so return undef
-        return undef unless $user;
+	my $program_name = $self->program_name();
+	my $component_name = $self->component_name();
+	my $version = $self->version();
+
+	my $liblpp_dir = "/usr";
+	$liblpp_dir .= "/share/lpp" if $self->_find_lpp_type() eq 'H';
+	$liblpp_dir .= "/lpp" if $self->_find_lpp_type() =~ /U|B/;
+	$liblpp_dir .= "/$program_name";
+	if ($self->_lppmode() eq "U")
+	{
+		$liblpp_dir .= "/$program_name";
+		$liblpp_dir .= ".$component_name";
+		$liblpp_dir .= "/$version";
+	}
+	my $liblpp_file = "$liblpp_dir/liblpp.a";
+	my $root_liblpp_dir = "$liblpp_dir/inst_root" if $self->_find_lpp_type() =~ /B/;
+	my $root_liblpp_file .= "$root_liblpp_dir/liblpp.a";
+	
+	# first create the ROOT liblpp.a file so it can be added to the USER
+	# part if there is a ROOT part.
+	my $applylist = "$program_name.$component_name.al";
+	my $inventory = "$program_name.$component_name.inventory";
+
+	my $control_dir = "$tmp_dir/control_files";
+        unless (-d $control_dir)
+        {
+            mkpath($control_dir, 0, 0755);
+        }
+
+	if ($self->_find_lpp_type() eq "B")
+	{
+		open (AL, ">>$control_dir/$applylist");
+		open (INV, ">>$control_dir/$inventory");
+		foreach my $object ($self->get_directory_objects(), $self->get_file_objects(), $self->get_link_objects())
+		{
+			my $destination = $object->destination();
+			my $source = $object->source();
+	                my $owner = $object->user();
+	                my $group = $object->group();
+	                my $type = $object->type();
+	                my $mode = $object->mode();
+			my $inv_type = $object->inventory_type();
+	
+			next unless $destination =~ m#/inst_root/#;
+	
+			$destination =~ s#^$root_liblpp_dir##;
+	
+			# This is all that needs to be done for the apply list
+			print AL ".$destination\n" unless $inv_type eq 'SYMLINK';
+	
+			print INV "$destination:\n";
+			print INV "\tclass = apply,inventory,$program_name.$component_name\n";
+			print INV "\towner = $owner\n";
+			print INV "\tgroup = $group\n";
+			print INV "\tmode = $mode\n";
+			print INV "\ttype = $inv_type\n";
+			if ($inv_type =~ /FILE/)
+			{
+				if ($type =~ /config|volatile/i)
+				{
+					print INV "\tsize = VOLATILE\n";
+					print INV "\tchecksum = VOLATILE\n";
+				}
+				else
+				{
+					my @stats = stat($source);
+					print INV "\tsize = $stats[7]\n";
+	
+					my $checksum = `sum $source`;
+					chomp $checksum;
+					$checksum =~ s/(\d+\s+\d+\s).*/$1/;
+					print INV "\tchecksum = \"$checksum\"\n";
+				}
+			}
+	               	my $links = $object->links();
+			if (scalar $links)
+			{
+				print INV "\tlinks = $links\n";
+			}
+			if ($inv_type eq 'SYMLINK')
+			{
+				print INV "\ttarget = $source\n";
+			}
+			print INV "\n";
+		}
+		close AL;
+		close INV;
+	}
+
+	# now archive all the control files
+	# We need to do the root part first.
+	opendir (DIR, "$control_dir") or die "Error: Cannot open temporary directory \"$control_dir\" for reading: $!\n";
+	my @control_file_list = readdir DIR;
+	closedir DIR;
+	foreach my $file (@control_file_list)
+	{
+		next if $file =~ /^.$|^..$/;
+		unless (system("ar -c -q $tmp_dir/root_liblpp.a $control_dir/$file") == 0)
+		{
+			warn "Warning: There were problems adding the control file $file to $tmp_dir/root_liblpp.a:\n$!";
+			return undef;
+		}
+	}
+	rmtree($control_dir, 0, 1);
+
+	if (-f "$tmp_dir/root_liblpp.a")
+	{
+		# Add the root liblpp.a to the package if it exists
+		my %data;
+		$data{'TYPE'} = 'file';
+		$data{'MODE'} = '0755';
+		$data{'SOURCE'} = "$tmp_dir/root_liblpp.a";
+		$data{'DESTINATION'} .= "$root_liblpp_file";
+		unless ($self->add_item(%data))
+		{
+			warn "Error: Couldn't add $tmp_dir/root_liblpp.a to the package\n";
+			return undef;
+		}
+	}
+
+	# Now we need to add any directories for the root part that don't exist.
+	# as they are required to be deployed in the USER part. seems weird to
+	# me but that's how it is. (There is logic to madness sometimes though
+	# hard to see.)
+	$self->_add_objects_for_user_part();
+
+	# Now create the USER or SHARE control files.
+        unless (-d $control_dir)
+        {
+            mkpath($control_dir, 0, 0755);
+        }
+
+	open (AL, ">>$control_dir/$applylist");
+	open (INV, ">>$control_dir/$inventory");
+	foreach my $object ($self->get_directory_objects(), $self->get_file_objects(), $self->get_link_objects())
+	{
+		my $destination = $object->destination();
+		my $source = $object->source();
+                my $owner = $object->user();
+                my $group = $object->group();
+                my $type = $object->type();
+                my $mode = $object->mode();
+		my $inv_type = $object->inventory_type();
+
+		# This is all that needs to be done for the apply list
+		print AL ".$destination\n";
+		# I'm not sure if we should be doing this here to. some more
+		# testing is required to check this as the standard is not to
+		# clear.
+		#print AL ".$destination\n" unless $inv_type eq 'SYMLINK';
+
+		# if there is a root part we don't need to set the inventory
+		# data for it in the user part
+		next if $destination =~ m#/usr/lpp#;
+
+		print INV "$destination:\n";
+		print INV "\tclass = apply,inventory,$program_name.$component_name\n";
+		print INV "\towner = $owner\n";
+		print INV "\tgroup = $group\n";
+		print INV "\tmode = $mode\n";
+		print INV "\ttype = $inv_type\n";
+		if ($inv_type =~ /FILE/)
+		{
+			if ($type =~ /config|volatile/i)
+			{
+				print INV "\tsize = VOLATILE\n";
+				print INV "\tchecksum = VOLATILE\n";
+			}
+			else
+			{
+				my @stats = stat($source);
+				print INV "\tsize = $stats[7]\n";
+
+				my $checksum = `sum $source`;
+				chomp $checksum;
+				$checksum =~ s/(\d+\s+\d+\s).*/$1/;
+				print INV "\tchecksum = \"$checksum\"\n";
+			}
+		}
+               	my $links = $object->links();
+		if (scalar $links)
+		{
+			print INV "\tlinks = $links\n";
+		}
+		if ($inv_type eq 'SYMLINK')
+		{
+			print INV "\ttarget = $source\n";
+		}
+		print INV "\n";
+	}
+	close AL;
+	close INV;
 
         # This is a list of possible config files that can be added to the liblpp.a archive.
         # TODO: need to make a method to set all of these files.
-        my @config_files = qw( cfginfo cfgfiles err fixdata namelist odmadd rm_inv trc config config_u odmdel pre_d pre_i pre_u pre_rm posti post_u unconfig unconfig_u unodmadd unport_i unpost_u unpre_i unpre_u copyright );
+        #my @config_files = qw( cfginfo cfgfiles err fixdata namelist odmadd rm_inv trc config config_u odmdel pre_d pre_i pre_u pre_rm posti post_u unconfig unconfig_u unodmadd unport_i unpost_u unpre_i unpre_u copyright );
 
-        # restructure the tmp directory
-        unless (-d $root)
-        {
-            mkpath($root, 0, 0755);
-        }
-        unless (-d $user)
-        {
-            mkpath($user, 0, 0755);
-        }
-        my @items = `ls $tmp_dir`;
-        foreach my $item (@items)
-        {
-                chomp $item;
-                next if $item eq 'usr';
-                next if $item eq 'lpp_name';
-                # everything else must be part of the root install
-                move("$tmp_dir/$item", "$root/$item");
-        }
+	# The copyright file is mandatory so create it if it not set
+	if ($self->license_file())
+	{
+		return undef unless copy($self->license_file(), "$control_dir/$program_name.$component_name.copyright");
+	}
+	else
+	{
+		open(FILE, ">$control_dir/lpp.copyright");
+		print FILE "No specific copyright in effect.\n";
+		close FILE;
+	}
 
-        # create the apply list
-        $self->_create_apply_lists();
+	# this will print a message for the user that a reboot is required.
+	if ($self->reboot_required())
+	{
+		open(FILE, ">$control_dir/$program_name.$component_name.cfginfo");
+		print FILE "BOOT\n";
+		close FILE;
+	}
 
-        # create the invertory file
+	# now archive all the control files
+	# We need to do the root part first.
+	opendir (DIR, "$control_dir") or die "Error: Cannot open temporary directory \"$control_dir\" for reading: $!\n";
+	@control_file_list = readdir DIR;
+	closedir DIR;
+	foreach my $file (@control_file_list)
+	{
+		next if $file =~ /^.$|^..$/;
+		unless (system("ar -c -q $tmp_dir/user_liblpp.a $control_dir/$file") == 0)
+		{
+			warn "Warning: There were problems adding the control file $file to $tmp_dir/user_liblpp.a:\n$!";
+			return undef;
+		}
+	}
+	rmtree($control_dir, 0, 1);
 
-        warn "USER:\"$user\"\nROOT:\"$root\"\n";
+	if (-f "$tmp_dir/user_liblpp.a")
+	{
+		# Add the root liblpp.a to the package if it exists
+		my %data;
+		$data{'TYPE'} = 'file';
+		$data{'MODE'} = '0755';
+		$data{'SOURCE'} = "$tmp_dir/user_liblpp.a";
+		$data{'DESTINATION'} .= "$liblpp_file";
+		unless ($self->add_item(%data))
+		{
+			warn "Error: Couldn't add $tmp_dir/user_liblpp.a to the package\n";
+			return undef;
+		}
+	}
+
+	return 1;
 }
 
 ################################################################################
-# Function:	_control_file_names()
-
-=head2 B<_control_file_names()>
-
-This method the names for the user and root control file (liblpp.a) locations.
-
-=cut
-sub _control_file_names
+# Function:	_create_bff()
+# Description:	This finction creates the backup format file that is the actual
+#		package.
+# Arguments:	None.
+# Returns:	True on success else undef.
+#
+sub _create_bff
 {
 	my $self = shift;
-        my $tmp_dir = $self->tmp_dir();
-        my $root;
-        my $user;
-        if ( ($self->_find_lpp_type() eq 'B') or ($self->_find_lpp_type() eq 'U') )
-        {
-            if ($self->_lppmode() eq 'I')
-            {
-                # we have an install
-                $root = "$tmp_dir/usr/lpp/" . $self->program_name() ."/inst_root";
-                $user = "$tmp_dir/usr/lpp/" . $self->program_name();
-            }
-            else
-            {
-                # we have an update
-                $root = "$tmp_dir/usr/lpp/" . $self->program_name();
-                $root .= "/". $self->program_name();
-                $root .= ".". $self->component_name();
-                $root .= "/". $self->version() ."/inst_root";
-                $user = "$tmp_dir/usr/lpp/" . $self->program_name();
-                $user .= "/". $self->program_name();
-                $user .= ".". $self->component_name();
-                $user .= "/". $self->version();
-            }
-        }
-        elsif ($self->_find_lpp_type() eq 'H')
-        {
-            if ($self->_lppmode() eq 'I')
-            {
-                # we have an install
-                $root = "$tmp_dir/usr/share/lpp/" . $self->program_name();
-                $user = "$tmp_dir/usr/share/lpp/" . $self->program_name();
-            }
-            else
-            {
-                # we have an update
-                $root = "$tmp_dir/usr/share/lpp/" . $self->program_name();
-                $root .= "/". $self->program_name();
-                $root .= ".". $self->component_name();
-                $root .= "/". $self->version();
-                $user = "$tmp_dir/usr/share/lpp/" . $self->program_name();
-                $user .= "/". $self->program_name();
-                $user .= ".". $self->component_name();
-                $user .= "/". $self->version();
-            }
-        }
-        else
-        {
-            warn "Error: Cannot find the lpp type si I cannot determine the location of the control files.\n";
-            return undef;
-        }
-        return $user, $root;
+	my $tmp_dir = $self->tmp_dir();
+
+	my $cwd = getcwd();
+	chdir $tmp_dir;
+
+	my @files_to_backup = ('./lpp_name');
+	foreach my $object ($self->get_directory_objects(), $self->get_file_objects(), $self->get_link_objects())
+	{
+		push @files_to_backup, ".".$object->destination();
+	}
+
+	open (FILE, ">./backup.list") or 
+		warn "Error: Cannot open $tmp_dir/backup.list for writing: $!\n" and
+		chdir $cwd and
+		return undef;
+
+	foreach my $file (@files_to_backup)
+	{
+		print FILE "$file\n";
+	}
+	close FILE;
+
+	my $package_file = $self->output_dir();
+	$package_file .= "/" . $self->package_name();
+	$package_file .= ".bff";
+	unless (system("backup -vi -q -f $package_file < ./backup.list") eq 0)
+	{
+		warn "Error: Failed to create the Backup-format file. $!\n";
+		chdir $cwd;
+		return undef;
+	}
+	
+	chdir $cwd;
+
+	return 1;
 }
 
 ################################################################################
-# Function:	_create_apply_lists()
-
-=head2 B<_create_apply_lists()>
-
-This method creates the apply list to be included in the liblpp.a.
-
-=cut
-sub _create_apply_lists
+# Function:	_setup_for_root()
+# Description:	This function creates a bunch of objects that need to be added
+#		for the root portion of the package and modifies objects that
+#		are not installed in /usr.
+# Arguments:	None.
+# Returns:	None but modifies the objects.
+#
+sub _setup_for_root
 {
 	my $self = shift;
+
+	# create objects for the root portion of the package
+	my %data;
+	$data{'TYPE'} = 'directory';
+	$data{'MODE'} = '0755';
+	$data{'DESTINATION'} = "/usr/lpp/" . $self->program_name();
+	unless ($self->add_item(%data))
+	{
+		warn "Error: Couldn't add $data{'DESTINATION'} to the package.\n";
+	}
+
+	if ($self->_lppmode() eq "U")
+	{
+		$data{'DESTINATION'} .= "/" . $self->program_name();
+		$data{'DESTINATION'} .= "." . $self->component_name();
+		unless ($self->add_item(%data))
+		{
+			warn "Error: Couldn't add $data{'DESTINATION'} to the package.\n";
+		}
+		$data{'DESTINATION'} .= "/" . $self->version();
+		unless ($self->add_item(%data))
+		{
+			warn "Error: Couldn't add $data{'DESTINATION'} to the package.\n";
+		}
+	}
+
+	$data{'DESTINATION'} .= "/inst_root";
+	unless ($self->add_item(%data))
+	{
+		warn "Error: Couldn't add $data{'DESTINATION'} to the package.\n";
+	}
+
+	# modify all objects not installed under /usr
+	foreach my $object ($self->get_object_list())
+	{
+		my $destination = $object->destination();
+		next if $destination =~ m#^/usr#;
+		my $new_destination = "/usr/lpp";
+		$new_destination .= "/" . $self->program_name();
+		if ($self->_lppmode() eq "U")
+		{
+			$new_destination .= "/" . $self->program_name();
+			$new_destination .= "." . $self->component_name();
+			$new_destination .= "/" . $self->version();
+		}
+		$new_destination .= "/inst_root$destination";
+		unless ($object->destination($new_destination))
+		{
+			warn "Error: Couldn't change the installation destination from $destination to $new_destination\n";
+		}
+	}
+}
+
+################################################################################
+# Function:	_add_objects_for_user_part()
+# Description:	This function adds DIRECTORY objects for objects installed into
+#		the ROOT part of the package. This is required so that the ROOT
+#		objects are deployed correctly. Not that these objects should
+#		not be part of the ROOT part. i.e. if you install a config file
+#		in /etc you shouldn't be deploying the directory /etc as this is
+#		part of the base operating system (bos).
+#		We cannot just do a find here as we haven't created the
+#		directory structure yet.
+# Arguments:	None.
+# Returns:	true on success else undef.
+#
+sub _add_objects_for_user_part
+{
+	my $self = shift;
+	my $tmp_dir = $self->tmp_dir();
+
+	my $root_dir = "/usr/lpp";
+	$root_dir .= "/". $self->program_name();
+	if ($self->_lppmode() eq "U")
+	{
+		$root_dir .= "/". $self->program_name();
+		$root_dir .= ".". $self->component_name();
+		$root_dir .= "/". $self->version();
+	}
+	$root_dir .= "/inst_root";
+
+	# find a list of objects that are installed in the root part.
+	my %destinations;
+	foreach my $object ($self->get_object_list())
+	{
+		my $destination = $object->destination();
+		next unless $destination =~ m#$root_dir/#;
+		next if $destination =~ m#$root_dir/liblpp.a#;
+		$destinations{$destination}++;
+	}
+
+	foreach my $destination (sort keys %destinations)
+	{
+		my $directory = dirname($destination);
+		while ($directory !~ m#^$root_dir$#)
+		{
+			unless (exists $destinations{$directory})
+			{
+				my %data;
+				$data{'TYPE'} = 'directory';
+				$data{'MODE'} = '0755';
+				$data{'DESTINATION'} = "$directory";
+				unless ($self->add_item(%data))
+				{
+					warn "Error: Couldn't add $data{'DESTINATION'} to the package.\n";
+				}
+				$destinations{$directory}++;
+			}
+
+			$directory = dirname($directory);
+		}
+	}
+
+	return 1;
 }
 
 1;
@@ -735,16 +1193,18 @@ __END__
 
 =head1 AUTHOR
 
- Bernard Davison <rbdavison@cpan.org>
+R Bernard Davison E<lt>rbdavison@cpan.orgE<gt>
 
 =head1 HOMEPAGE
 
- http://bernard.gondwana.com.au
+http://bernard.gondwana.com.au
 
 =head1 COPYRIGHT
 
- Copyright (c) 2001 Gondwanatech. All rights reserved.
- This program is free software; you can redistribute it and/or modify it under
- the same terms as Perl itself.
+Copyright (c) 2001 Gondwanatech. All rights reserved.
+
+This program is free software; you can redistribute it and/or modify it under
+the same terms as Perl itself.
 
 =cut
+

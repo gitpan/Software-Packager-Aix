@@ -7,6 +7,9 @@ WriteMakefile(
 	'AUTHOR'	=> 'R Bernard Davison (rbdavison@cpan.org)',
 	'ABSTRACT'	=> 'This module extends Software::Packager providing the ability to create packages for the AIX platform.',
 	'PREREQ_PM'	=> {
-		'Software::Packager'	=>	'0.07',
+		'Software::Packager'	=>	'0.09',
 		},
+       	'clean'         => {
+               	'FILES' => '*/*/*/*~ */*/*/*/*~ *.tar *.tar.gz t/aix_tmp_build_dir *.bff',
+               	},
 );
