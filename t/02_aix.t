@@ -7,103 +7,85 @@ use Test;
 
 BEGIN
 {
-	if ($Config{'osname'} =~ /aix/i)
-	{
-		plan( tests => 19 , todo => [19]);
-	}
-	else
-	{
-		plan(tests=>0);
-		exit 0;
-	}
+#	if ($Config{'osname'} =~ /aix/i)
+#	{
+		plan( tests => 23 , todo => [23]);
+#	}
+#	else
+#	{
+#		plan(tests=>0);
+#		exit 0;
+#	}
 }
 
 $|++; 
 my $test_number = 1;
+my $comment = "";
 
-# test 1
-my $packager = new Software::Packager();
-$packager ? print "ok $test_number\n" : print "not ok $test_number\n";
-$test_number++;
+my $packager = new Software::Packager('aix');
+print_status($packager);
 
-# test 2
 $packager->package_name('AIXTestPackage');
 my $package_name = $packager->package_name();
-$package_name eq 'AIXTestPackage' ? print "ok $test_number\n" : print "not ok $test_number\n";
-$test_number++;
+same('AIXTestPackage', $package_name);
 
-# test 3
 $packager->description("This is a description");
 my $description = $packager->description();
-$description eq "This is a description" ? print "ok $test_number\n" : print "not ok $test_number\n";
-$test_number++;
+same("This is a description", $description);
 
-# test 4
-$packager->version('1.0.0');
-my $version = $packager->version();
-$version eq '1.0.0' ? print "ok $test_number\n" : print "not ok $test_number\n";
-$test_number++;
+$packager->version('4.3.2.1');
+same('4.3.2.1' ,$packager->version());
 
-# test 5
+$packager->version('2');
+same('2.1.0.0', $packager->version());
+
 my $cwd_output_dir = getcwd();
 $packager->output_dir($cwd_output_dir);
 my $output_dir = $packager->output_dir();
-$output_dir eq "$cwd_output_dir" ? print "ok $test_number\n" : print "not ok $test_number\n";
-$test_number++;
+same("$cwd_output_dir", $output_dir);
 
-# test 6
 $packager->category("Applications");
 my $category = $packager->category();
-$category eq "Applications" ? print "ok $test_number\n" : print "not ok $test_number\n";
-$test_number++;
+same("Applications", $category);
 
-# test 7
 $packager->architecture("None");
 my $architecture = $packager->architecture();
-$architecture eq "None" ? print "ok $test_number\n" : print "not ok $test_number\n";
-$test_number++;
+same("None", $architecture);
 
-# test 8
 $packager->icon("None");
 my $icon = $packager->icon();
-$icon eq "None" ? print "ok $test_number\n" : print "not ok $test_number\n";
-$test_number++;
+same("None", $icon);
 
-# test 9
 $packager->prerequisites("None");
 my $prerequisites = $packager->prerequisites();
-$prerequisites eq "None" ? print "ok $test_number\n" : print "not ok $test_number\n";
-$test_number++;
+same("None", $prerequisites);
 
-# test 10
 $packager->vendor("Gondwanatech");
 my $vendor = $packager->vendor();
-$vendor eq "Gondwanatech" ? print "ok $test_number\n" : print "not ok $test_number\n";
-$test_number++;
+same("Gondwanatech", $vendor);
 
-# test 11
 $packager->email_contact('rbdavison@cpan.org');
 my $email_contact = $packager->email_contact();
-$email_contact eq 'rbdavison@cpan.org' ? print "ok $test_number\n" : print "not ok $test_number\n";
-$test_number++;
+same('rbdavison@cpan.org', $email_contact);
 
-# test 12
 $packager->creator('R Bernard Davison');
 my $creator = $packager->creator();
-$creator eq 'R Bernard Davison' ? print "ok $test_number\n" : print "not ok $test_number\n";
-$test_number++;
+same('R Bernard Davison', $creator);
 
-# test 13
 $packager->install_dir("perllib");
 my $install_dir = $packager->install_dir();
-$install_dir eq "perllib" ? print "ok $test_number\n" : print "not ok $test_number\n";
-$test_number++;
+same("perllib", $install_dir);
+
+$packager->program_name("softwarepackager");
+same("softwarepackager", $packager->program_name());
+
+$packager->component_name("aix");
+same("aix", $packager->component_name());
 
 # test 14
 $packager->tmp_dir("t/aix_tmp_build_dir");
 my $tmp_dir = $packager->tmp_dir();
-$tmp_dir eq "t/aix_tmp_build_dir" ? print "ok $test_number\n" : print "not ok $test_number\n";
-$test_number++;
+same("t/aix_tmp_build_dir", $tmp_dir);
 
 # test 15
 # so we have finished the configuration so add the objects.
@@ -119,63 +101,88 @@ while (<MANIFEST>)
 	$data{'TYPE'} = 'File';
 	$data{'TYPE'} = 'Directory' if -d $file;
 	$data{'SOURCE'} = "$cwd/$file";
-	$data{'DESTINATION'} = "/$file";
+        if ($file =~ /etc/)
+        {
+                $data{'DESTINATION'} = $file;
+        }
+        else
+        {
+                $data{'DESTINATION'} = "/usr/lib/perl/$file";
+        }
 	$data{'MODE'} = sprintf "%04o", $stats[2] & 07777;
 	$add_status = undef unless $packager->add_item(%data);
 }
-$add_status ? print "ok $test_number\n" : print "not ok $test_number\n";
-$test_number++;
+print_status($add_status);
 close MANIFEST;
+foreach my $dir  ("lib", "lib/Software", "lib/Software/Packager", "lib/Software/Packager/Object", "t")
+{
+	my @stats = stat $dir;
+	my %data;
+	$data{'TYPE'} = 'Directory';
+	$data{'DESTINATION'} = "/usr/lib/perl/$dir";
+	$data{'MODE'} = sprintf "%04o", $stats[2] & 07777;
+	$add_status = undef unless $packager->add_item(%data);
+}
+print_status($add_status);
 
 # test 16
 my %hardlink;
 $hardlink{'TYPE'} = 'Hardlink';
-$hardlink{'SOURCE'} = "lib/Software/Packager.pm";
-$hardlink{'DESTINATION'} = "HardLink.pm";
-if ($packager->add_item(%hardlink))
-{
-	print "ok $test_number\n";
-}
-else
-{
-	 print "not ok $test_number\n";
-}
-$test_number++;
+$hardlink{'SOURCE'} = "lib/Software/Packager/Aix.pm";
+$hardlink{'DESTINATION'} = "/usr/lib/perl/HardLink.pm";
+print_status($packager->add_item(%hardlink));
 
 # test 17
 my %softlink;
 $softlink{'TYPE'} = 'softlink';
 $softlink{'SOURCE'} = "lib/Software";
-$softlink{'DESTINATION'} = "SoftLink";
-if ($packager->add_item(%softlink))
-{
-	print "ok $test_number\n";
-}
-else
-{
-	 print "not ok $test_number\n";
-}
-$test_number++;
+$softlink{'DESTINATION'} = "/usr/lib/perl/SoftLink";
+print_status($packager->add_item(%softlink));
 
 # test 18
-if ($packager->package())
-{
-	print "ok $test_number\n";
-}
-else
-{
-	print "not ok $test_number\n";
-}
-$test_number++;
+print_status($packager->package());
 
 # test 19
 my $package_file = $packager->output_dir();
 $package_file .= "/" . $packager->package_name();
 $package_file .= ".bff";
-# we expect this to fail at the moment
-print "todo $test_number\n";
--f $package_file ? print "ok $test_number\n" : print "not ok $test_number\n";
-$test_number++;
+$comment = "# As the package creation is not finished we have no package to test for";
+print_status(-f $package_file);
 
 # test 20
 #warn $packager->_find_lpp_type(), "\n";
+
+####################
+# Functions to use
+sub same
+{
+	my $expected = shift;
+	my $got = shift;
+	if ($expected eq $got)
+	{
+		print_status(1);
+	}
+	else
+	{
+		$comment = " # Expected:\"$expected\" but Got:\"$got\"" unless $comment;
+		print_status(0, $comment);
+	}
+	$comment = "";
+}
+
+sub print_status
+{
+	my $value = shift;
+	if ($value)
+	{
+		print "ok $test_number\n";
+	}
+	else
+	{
+		print "not ok $test_number $comment\n";
+	}
+	$test_number++;
+	$comment = "";
+}
+
+

@@ -25,10 +25,11 @@ use Software::Packager::Object;
 
 ####################
 # Variables
-our @ISA = qw( Software::Packager::Object );
-our @EXPORT = qw();
-our @EXPORT_OK = qw();
-our $VERSION = 0.01;
+use vars qw(@ISA @EXPORT @EXPORT_OK $VERSION);
+@ISA = qw( Software::Packager::Object );
+@EXPORT = qw();
+@EXPORT_OK = qw();
+$VERSION = 0.02;
 
 ####################
 # Functions
