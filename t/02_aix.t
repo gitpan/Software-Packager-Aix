@@ -7,15 +7,15 @@ use Test;
 
 BEGIN
 {
-#	if ($Config{'osname'} =~ /aix/i)
-#	{
+	if ($Config{'osname'} =~ /aix/i)
+	{
 		plan( tests => 23 , todo => [23]);
-#	}
-#	else
-#	{
-#		plan(tests=>0);
-#		exit 0;
-#	}
+	}
+	else
+	{
+		plan(tests=>0);
+		exit 0;
+	}
 }
 
 $|++; 
